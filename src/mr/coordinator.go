@@ -5,27 +5,195 @@ import "net"
 import "os"
 import "net/rpc"
 import "net/http"
+import "sync"
+import "time"
+
+const pingInterval = 1 * time.Second
+const taskTimeout = 3 * time.Second
 
 type Coordinator struct {
-	files   []string
+	mu      sync.Mutex
+	tasks   []Task // map tasks during the map phase, reduce tasks after
+	phase   TaskType
+	jobDone bool
+	nMap    int
 	nReduce int
+	workers []Slave
 }
 
-// Your code here -- RPC handlers for the worker to call.
+type Task struct {
+	id        int
+	taskType  TaskType
+	status    string
+	file      string
+	worker    *string
+	startTime time.Time
+}
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+type Slave struct {
+	id   string
+	task *Task
+}
+
+func Find(tasks []Task, targetFile string) *Task {
+	for i := range tasks {
+		if tasks[i].file == targetFile {
+			return &tasks[i]
+		}
+	}
 	return nil
+}
+
+func (c *Coordinator) Subscribe(args *SubscribeArgs, reply *SubscribeReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.workers = append(c.workers, Slave{
+		id:   args.WorkerId,
+		task: nil,
+	})
+	return nil
+}
+
+func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	reply.NReduce = c.nReduce
+	reply.NMap = c.nMap
+
+	if c.jobDone {
+		reply.JobDone = true
+		return nil
+	}
+
+	t := c.findIdleTask()
+	if t == nil {
+		t = c.findTimedOutTask()
+	}
+	if t == nil {
+		return nil
+	}
+
+	workerId := args.WorkerId
+	t.status = "in-progress"
+	t.worker = &workerId
+	t.startTime = time.Now()
+
+	reply.File = t.file
+	reply.TaskId = t.id
+	reply.TaskType = t.taskType
+	return nil
+}
+
+func (c *Coordinator) allTasksDone() bool {
+	for i := range c.tasks {
+		if c.tasks[i].status != "Done" {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Coordinator) findIdleTask() *Task {
+	for i := range c.tasks {
+		if c.tasks[i].status == "idle" {
+			return &c.tasks[i]
+		}
+	}
+	return nil
+}
+
+func (c *Coordinator) findTimedOutTask() *Task {
+	for i := range c.tasks {
+		t := &c.tasks[i]
+		if t.status == "in-progress" && time.Since(t.startTime) > taskTimeout {
+			return t
+		}
+	}
+	return nil
+}
+
+func (c *Coordinator) TaskDone(args *TaskDoneArgs, reply *TaskDoneReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for i := range c.tasks {
+		t := &c.tasks[i]
+		if t.taskType != args.TaskType || t.id != args.TaskId {
+			continue
+		}
+		if t.status == "in-progress" && t.worker != nil && *t.worker == args.WorkerId {
+			t.status = "Done"
+			reply.IsOk = true
+			if c.allTasksDone() {
+				c.nextPhase()
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+func (c *Coordinator) nextPhase() {
+	if c.phase == MapTask {
+		c.tasks = make([]Task, c.nReduce)
+		for y := 0; y < c.nReduce; y++ {
+			c.tasks[y] = Task{
+				id:       y,
+				taskType: ReduceTask,
+				status:   "idle",
+			}
+		}
+		c.phase = ReduceTask
+		return
+	}
+	c.jobDone = true
+}
+
+func (c *Coordinator) pingLoop() {
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		c.mu.Lock()
+		ids := make([]string, len(c.workers))
+		for i, w := range c.workers {
+			ids[i] = w.id
+		}
+		c.mu.Unlock()
+
+		for _, id := range ids {
+			go func(id string) {
+				if !pingWorker(id) {
+					log.Printf("ping to worker %v failed", id)
+				}
+			}(id)
+		}
+	}
+}
+
+func pingWorker(workerId string) bool {
+	client, err := rpc.DialHTTP("unix", workerSock(workerId))
+	if err != nil {
+		return false
+	}
+	defer client.Close()
+
+	reply := PingReply{}
+	done := make(chan error, 1)
+	go func() { done <- client.Call("WorkerServer.Ping", &PingArgs{}, &reply) }()
+
+	select {
+	case err := <-done:
+		return err == nil && reply.Ok
+	case <-time.After(pingInterval):
+		return false
+	}
 }
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
-	//l, e := net.Listen("tcp", ":1234")
 	sockname := coordinatorSock()
 	os.Remove(sockname)
 	l, e := net.Listen("unix", sockname)
@@ -45,14 +213,29 @@ func (c *Coordinator) Done() bool {
 	return ret
 }
 
-// create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-	c.files = files
-	c.nReduce = nReduce
+	tasks := []Task{}
+	for i, file := range files {
+		tasks = append(tasks, Task{
+			id:       i,
+			taskType: MapTask,
+			status:   "idle",
+			file:     file,
+			worker:   nil,
+		})
+	}
+
+	c := &Coordinator{
+		tasks:   tasks,
+		phase:   MapTask,
+		nMap:    len(files),
+		nReduce: nReduce,
+		workers: []Slave{},
+	}
 
 	c.server()
-	return &c
+	go c.pingLoop()
+	return c
 }

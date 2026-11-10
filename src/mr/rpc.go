@@ -1,28 +1,58 @@
 package mr
 
-//
-// RPC definitions.
-//
-// remember to capitalize all names.
-//
-
 import "os"
 import "strconv"
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
-
-type ExampleArgs struct {
-	X int
+type SubscribeArgs struct {
+	File     string
+	WorkerId string
 }
 
-type ExampleReply struct {
-	Y int
+type SubscribeReply struct {
+	Resp string
 }
 
-// Add your RPC definitions here.
+type TaskDoneArgs struct {
+	WorkerId string
+	TaskType TaskType
+	TaskId   int
+}
+
+type TaskDoneReply struct {
+	IsOk bool // false if the task was no longer assigned to this worker
+}
+
+type PingArgs struct{}
+
+type PingReply struct {
+	Ok bool
+}
+
+type RequestTaskArgs struct {
+	WorkerId string
+}
+
+type TaskType int
+
+const (
+	NoTask TaskType = iota
+	MapTask
+	ReduceTask
+)
+
+type RequestTaskReply struct {
+	TaskType TaskType
+	TaskId   int
+	File     string
+	NMap     int
+	NReduce  int
+	JobDone  bool
+}
+
+// Socket each worker listens on so the coordinator can ping it.
+func workerSock(workerId string) string {
+	return coordinatorSock() + "-worker-" + workerId
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.

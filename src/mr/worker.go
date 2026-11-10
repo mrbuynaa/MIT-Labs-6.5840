@@ -1,11 +1,13 @@
 package mr
 
+import "encoding/json"
 import "fmt"
 import "log"
 import "net"
 import "net/http"
 import "net/rpc"
 import "os"
+import "time"
 import "hash/fnv"
 import "github.com/google/uuid"
 
@@ -27,15 +29,75 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	workerId := uuid.New().String()
 
-	// start listening before subscribing so the first ping can reach us
 	l := startWorkerServer(workerId)
 	defer l.Close()
 
 	Subscribe(SubscribeArgs{WorkerId: workerId})
 
-	// keep the worker alive so it can answer pings
-	select {}
+	for {
+		reply, ok := RequestTask(workerId)
+		if !ok {
+			return
+		}
+		if reply.JobDone {
+			fmt.Printf("Worker %v: job done, exiting\n", workerId)
+			return
+		}
+
+		switch reply.TaskType {
+		case NoTask:
+			time.Sleep(requestRetryInterval)
+		case MapTask:
+			fmt.Printf("Worker %v got map task %v (nReduce=%d)\n", workerId, reply.File, reply.NReduce)
+			kva := runMap(mapf, reply.File)
+			writeIntermediate(kva, reply.TaskId, reply.NReduce)
+			fmt.Printf("Worker %v: map %d on %v wrote %d key/values\n", workerId, reply.TaskId, reply.File, len(kva))
+			ReportTaskDone(workerId, MapTask, reply.TaskId)
+		case ReduceTask:
+			fmt.Printf("Worker %v got reduce task %d (nMap=%d)\n", workerId, reply.TaskId, reply.NMap)
+		}
+	}
 }
+
+func runMap(mapf func(string, string) []KeyValue, filename string) []KeyValue {
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		log.Fatalf("cannot read %v: %v", filename, err)
+	}
+	return mapf(filename, string(content))
+}
+
+func writeIntermediate(kva []KeyValue, mapId int, nReduce int) {
+	files := make([]*os.File, nReduce)
+	encoders := make([]*json.Encoder, nReduce)
+	for y := 0; y < nReduce; y++ {
+		f, err := os.CreateTemp(".", fmt.Sprintf("mr-%d-%d-*", mapId, y))
+		if err != nil {
+			log.Fatalf("cannot create temp file: %v", err)
+		}
+		files[y] = f
+		encoders[y] = json.NewEncoder(f)
+	}
+
+	for _, kv := range kva {
+		y := ihash(kv.Key) % nReduce
+		if err := encoders[y].Encode(&kv); err != nil {
+			log.Fatalf("cannot encode %v: %v", kv, err)
+		}
+	}
+
+	for y, f := range files {
+		if err := f.Close(); err != nil {
+			log.Fatalf("cannot close %v: %v", f.Name(), err)
+		}
+		final := fmt.Sprintf("mr-%d-%d", mapId, y)
+		if err := os.Rename(f.Name(), final); err != nil {
+			log.Fatalf("cannot rename %v to %v: %v", f.Name(), final, err)
+		}
+	}
+}
+
+const requestRetryInterval = 500 * time.Millisecond
 
 // WorkerServer holds the RPC methods the coordinator can call on a worker.
 type WorkerServer struct{}
@@ -71,6 +133,22 @@ func Subscribe(args SubscribeArgs) {
 	} else {
 		fmt.Printf("call failed!\n")
 	}
+}
+
+func RequestTask(workerId string) (reply RequestTaskReply, ok bool) {
+	args := RequestTaskArgs{WorkerId: workerId}
+	ok = call("Coordinator.RequestTask", &args, &reply)
+	return reply, ok
+}
+
+// ReportTaskDone tells the coordinator this worker finished a task.
+// It returns false if the RPC failed or the coordinator rejected the report
+// (the task had already been reassigned after a timeout).
+func ReportTaskDone(workerId string, taskType TaskType, taskId int) bool {
+	args := TaskDoneArgs{WorkerId: workerId, TaskType: taskType, TaskId: taskId}
+	reply := TaskDoneReply{}
+	ok := call("Coordinator.TaskDone", &args, &reply)
+	return ok && reply.IsOk
 }
 
 // send an RPC request to the coordinator, wait for the response.
