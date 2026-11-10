@@ -22,12 +22,6 @@ type TaskDoneReply struct {
 	IsOk bool // false if the task was no longer assigned to this worker
 }
 
-type PingArgs struct{}
-
-type PingReply struct {
-	Ok bool
-}
-
 type RequestTaskArgs struct {
 	WorkerId string
 }
@@ -47,11 +41,6 @@ type RequestTaskReply struct {
 	NMap     int
 	NReduce  int
 	JobDone  bool
-}
-
-// Socket each worker listens on so the coordinator can ping it.
-func workerSock(workerId string) string {
-	return coordinatorSock() + "-worker-" + workerId
 }
 
 // Cook up a unique-ish UNIX-domain socket name

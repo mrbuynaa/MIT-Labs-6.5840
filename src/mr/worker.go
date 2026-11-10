@@ -3,8 +3,6 @@ package mr
 import "encoding/json"
 import "fmt"
 import "log"
-import "net"
-import "net/http"
 import "net/rpc"
 import "os"
 import "sort"
@@ -29,9 +27,6 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	workerId := uuid.New().String()
-
-	l := startWorkerServer(workerId)
-	defer l.Close()
 
 	Subscribe(SubscribeArgs{WorkerId: workerId})
 
@@ -150,32 +145,6 @@ func runReduce(reducef func(string, []string) string, reduceId int, nMap int) {
 }
 
 const requestRetryInterval = 500 * time.Millisecond
-
-// WorkerServer holds the RPC methods the coordinator can call on a worker.
-type WorkerServer struct{}
-
-func (w *WorkerServer) Ping(args *PingArgs, reply *PingReply) error {
-	reply.Ok = true
-	return nil
-}
-
-// startWorkerServer serves WorkerServer RPCs on this worker's socket.
-func startWorkerServer(workerId string) net.Listener {
-	server := rpc.NewServer()
-	server.Register(&WorkerServer{})
-
-	mux := http.NewServeMux()
-	mux.Handle(rpc.DefaultRPCPath, server)
-
-	sockname := workerSock(workerId)
-	os.Remove(sockname)
-	l, err := net.Listen("unix", sockname)
-	if err != nil {
-		log.Fatal("worker listen error:", err)
-	}
-	go http.Serve(l, mux)
-	return l
-}
 
 func Subscribe(args SubscribeArgs) {
 	reply := SubscribeReply{}

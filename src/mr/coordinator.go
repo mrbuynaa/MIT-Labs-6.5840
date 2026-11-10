@@ -8,7 +8,6 @@ import "net/http"
 import "sync"
 import "time"
 
-const pingInterval = 1 * time.Second
 const taskTimeout = 10 * time.Second
 
 type Coordinator struct {
@@ -150,46 +149,6 @@ func (c *Coordinator) nextPhase() {
 	c.jobDone = true
 }
 
-func (c *Coordinator) pingLoop() {
-	ticker := time.NewTicker(pingInterval)
-	defer ticker.Stop()
-	for range ticker.C {
-		c.mu.Lock()
-		ids := make([]string, len(c.workers))
-		for i, w := range c.workers {
-			ids[i] = w.id
-		}
-		c.mu.Unlock()
-
-		for _, id := range ids {
-			go func(id string) {
-				if !pingWorker(id) {
-					log.Printf("ping to worker %v failed", id)
-				}
-			}(id)
-		}
-	}
-}
-
-func pingWorker(workerId string) bool {
-	client, err := rpc.DialHTTP("unix", workerSock(workerId))
-	if err != nil {
-		return false
-	}
-	defer client.Close()
-
-	reply := PingReply{}
-	done := make(chan error, 1)
-	go func() { done <- client.Call("WorkerServer.Ping", &PingArgs{}, &reply) }()
-
-	select {
-	case err := <-done:
-		return err == nil && reply.Ok
-	case <-time.After(pingInterval):
-		return false
-	}
-}
-
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
 	rpc.Register(c)
@@ -234,6 +193,5 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 
 	c.server()
-	go c.pingLoop()
 	return c
 }
