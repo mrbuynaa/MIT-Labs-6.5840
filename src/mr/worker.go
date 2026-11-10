@@ -2,8 +2,12 @@ package mr
 
 import "fmt"
 import "log"
+import "net"
+import "net/http"
 import "net/rpc"
+import "os"
 import "hash/fnv"
+import "github.com/google/uuid"
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -19,19 +23,46 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-// main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+	workerId := uuid.New().String()
 
-	// Your worker implementation here.
+	// start listening before subscribing so the first ping can reach us
+	l := startWorkerServer(workerId)
+	defer l.Close()
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	Subscribe(SubscribeArgs{WorkerId: workerId})
 
+	// keep the worker alive so it can answer pings
+	select {}
 }
 
-// example function to show how to make an RPC call to the coordinator.
-//
+// WorkerServer holds the RPC methods the coordinator can call on a worker.
+type WorkerServer struct{}
+
+func (w *WorkerServer) Ping(args *PingArgs, reply *PingReply) error {
+	reply.Ok = true
+	return nil
+}
+
+// startWorkerServer serves WorkerServer RPCs on this worker's socket.
+func startWorkerServer(workerId string) net.Listener {
+	server := rpc.NewServer()
+	server.Register(&WorkerServer{})
+
+	mux := http.NewServeMux()
+	mux.Handle(rpc.DefaultRPCPath, server)
+
+	sockname := workerSock(workerId)
+	os.Remove(sockname)
+	l, err := net.Listen("unix", sockname)
+	if err != nil {
+		log.Fatal("worker listen error:", err)
+	}
+	go http.Serve(l, mux)
+	return l
+}
+
 // the RPC argument and reply types are defined in rpc.go.
 func CallExample() {
 
@@ -52,6 +83,16 @@ func CallExample() {
 	if ok {
 		// reply.Y should be 100.
 		fmt.Printf("reply.Y %v\n", reply.Y)
+	} else {
+		fmt.Printf("call failed!\n")
+	}
+}
+
+func Subscribe(args SubscribeArgs) {
+	reply := SubscribeReply{}
+	ok := call("Coordinator.Subscribe", &args, &reply)
+	if ok {
+		fmt.Printf("Worker %v subscribed\n", args.WorkerId)
 	} else {
 		fmt.Printf("call failed!\n")
 	}
