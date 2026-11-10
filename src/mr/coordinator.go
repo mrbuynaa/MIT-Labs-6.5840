@@ -9,7 +9,7 @@ import "sync"
 import "time"
 
 const pingInterval = 1 * time.Second
-const taskTimeout = 3 * time.Second
+const taskTimeout = 10 * time.Second
 
 type Coordinator struct {
 	mu      sync.Mutex
@@ -206,11 +206,9 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-
-	return ret
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.jobDone
 }
 
 // main/mrcoordinator.go calls this function.

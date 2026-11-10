@@ -7,6 +7,7 @@ import "net"
 import "net/http"
 import "net/rpc"
 import "os"
+import "sort"
 import "time"
 import "hash/fnv"
 import "github.com/google/uuid"
@@ -55,6 +56,9 @@ func Worker(mapf func(string, string) []KeyValue,
 			ReportTaskDone(workerId, MapTask, reply.TaskId)
 		case ReduceTask:
 			fmt.Printf("Worker %v got reduce task %d (nMap=%d)\n", workerId, reply.TaskId, reply.NMap)
+			runReduce(reducef, reply.TaskId, reply.NMap)
+			fmt.Printf("Worker %v: reduce %d wrote mr-out-%d\n", workerId, reply.TaskId, reply.TaskId)
+			ReportTaskDone(workerId, ReduceTask, reply.TaskId)
 		}
 	}
 }
@@ -94,6 +98,54 @@ func writeIntermediate(kva []KeyValue, mapId int, nReduce int) {
 		if err := os.Rename(f.Name(), final); err != nil {
 			log.Fatalf("cannot rename %v to %v: %v", f.Name(), final, err)
 		}
+	}
+}
+
+func runReduce(reducef func(string, []string) string, reduceId int, nMap int) {
+	kva := []KeyValue{}
+	for x := 0; x < nMap; x++ {
+		name := fmt.Sprintf("mr-%d-%d", x, reduceId)
+		f, err := os.Open(name)
+		if err != nil {
+			log.Fatalf("cannot open %v: %v", name, err)
+		}
+		dec := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+		f.Close()
+	}
+
+	sort.Slice(kva, func(i, j int) bool { return kva[i].Key < kva[j].Key })
+
+	out, err := os.CreateTemp(".", fmt.Sprintf("mr-out-%d-*", reduceId))
+	if err != nil {
+		log.Fatalf("cannot create temp file: %v", err)
+	}
+
+	for i := 0; i < len(kva); {
+		j := i + 1
+		for j < len(kva) && kva[j].Key == kva[i].Key {
+			j++
+		}
+		values := make([]string, 0, j-i)
+		for k := i; k < j; k++ {
+			values = append(values, kva[k].Value)
+		}
+		fmt.Fprintf(out, "%v %v\n", kva[i].Key, reducef(kva[i].Key, values))
+		i = j
+	}
+
+	if err := out.Close(); err != nil {
+		log.Fatalf("cannot close %v: %v", out.Name(), err)
+	}
+	final := fmt.Sprintf("mr-out-%d", reduceId)
+	if err := os.Rename(out.Name(), final); err != nil {
+		log.Fatalf("cannot rename %v to %v: %v", out.Name(), final, err)
 	}
 }
 
