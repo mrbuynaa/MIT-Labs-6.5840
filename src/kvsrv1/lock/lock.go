@@ -1,16 +1,15 @@
 package lock
 
 import (
+	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
+	"time"
 )
 
 type Lock struct {
-	// IKVClerk is a go interface for k/v clerks: the interface hides
-	// the specific Clerk type of ck but promises that ck supports
-	// Put and Get.  The tester passes the clerk in when calling
-	// MakeLock().
-	ck kvtest.IKVClerk
-	// You may add code here
+	ck      kvtest.IKVClerk
+	lockKey string // shared key that all clients contend on
+	id      string // unique identity of this lock holder
 }
 
 // The tester calls MakeLock() and passes in a k/v clerk; your code can
@@ -19,15 +18,32 @@ type Lock struct {
 // Use l as the key to store the "lock state" (you would have to decide
 // precisely what the lock state is).
 func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
-	lk := &Lock{ck: ck}
-	// You may add code here
-	return lk
+	return &Lock{ck: ck, lockKey: l, id: kvtest.RandValue(8)}
 }
 
 func (lk *Lock) Acquire() {
-	// Your code here
+	for {
+		val, ver, err := lk.ck.Get(lk.lockKey)
+		if err == rpc.OK && val == lk.id {
+			return
+		}
+		if err == rpc.ErrNoKey || (err == rpc.OK && val == "") {
+			if err == rpc.ErrNoKey {
+				ver = 0
+			}
+			perr := lk.ck.Put(lk.lockKey, lk.id, ver)
+			if perr == rpc.OK {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (lk *Lock) Release() {
-	// Your code here
+	_, ver, _ := lk.ck.Get(lk.lockKey)
+	perr := lk.ck.Put(lk.lockKey, "", ver)
+	if perr == rpc.OK {
+		return
+	}
 }
