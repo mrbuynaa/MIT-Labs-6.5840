@@ -230,8 +230,6 @@ func (self *Raft) ReplicateLog(command interface{}, replicated chan<- bool) {
 			replicatedNode += 1
 		}
 		if replicatedNode == majority {
-			self.log = append(self.log, command)
-			self.lastLogTerm = self.currentTerm
 			replicated <- true
 		}
 	}
@@ -312,7 +310,12 @@ func (self *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, isLeader
 	}
 	self.ReplicateLog(command, replicated)
-	return len(self.log) - 1, self.currentTerm, isLeader
+	if <-replicated {
+		self.log = append(self.log, command)
+		self.lastLogTerm = self.currentTerm
+		return len(self.log) - 1, self.currentTerm, isLeader
+	}
+	return -1, -1, isLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
