@@ -136,35 +136,32 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-func (rf *Raft) StartElection() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	rf.currentTerm += 1
-	rf.state = "candidate"
-	rf.votedFor = rf.me
+func (self *Raft) StartElection() {
+	self.currentTerm += 1
+	self.state = "candidate"
+	self.votedFor = self.me
 	args := RequestVoteArgs{
-		CandidateId:  rf.me,
-		Term:         rf.currentTerm,
-		LastLogIndex: rf.commitIndex,
-		LastLogTerm:  rf.lastLogTerm,
+		CandidateId:  self.me,
+		Term:         self.currentTerm,
+		LastLogIndex: self.lastLogIdx,
+		LastLogTerm:  self.lastLogTerm,
 	}
 
 	votes := 1
-	majority := len(rf.peers)/2 + 1
-	totalPeers := len(rf.peers)
+	majority := len(self.peers)/2 + 1
+	totalPeers := len(self.peers)
 
 	ch := make(chan bool, totalPeers-1)
 
-	for idx := range rf.peers {
-		if idx == rf.me {
+	for idx := range self.peers {
+		if idx == self.me {
 			continue
 		}
 		go func(peer int) {
 			var reply RequestVoteReply
 
 			for {
-				ok := rf.sendRequestVote(peer, &args, &reply)
+				ok := self.sendRequestVote(peer, &args, &reply)
 				if ok {
 					ch <- reply.VoteGranted
 					return
@@ -173,14 +170,18 @@ func (rf *Raft) StartElection() {
 		}(idx)
 	}
 
-	for i := 0; i < len(rf.peers)-1; i++ {
+	for i := 0; i < len(self.peers)-1; i++ {
 		if <-ch {
 			votes++
 		}
 		if votes >= majority {
-			rf.state = "leader"
+			self.state = "leader"
 			return
 		}
+	}
+
+	if votes < majority {
+		self.state = "follower"
 	}
 
 }
@@ -193,12 +194,18 @@ func (self *Raft) RequestVote(candidate *RequestVoteArgs, reply *RequestVoteRepl
 	}
 
 	if candidate.LastLogIndex >= self.lastLogIdx && candidate.LastLogTerm >= self.lastLogTerm {
-		self.votedFor = candidate.CandidateId
+		if candidate.Term > self.lastLogTerm {
+			self.currentTerm = candidate.Term
+		}
+		self.votedFor = candidate.CandidateId // Үүнийг хэзээ null болгох ёстой вэ?
+		self.isLeaderOk = true                // Олон давхар election болохгүй гэдгийг яаж батлах билээ?
+
 		reply.VoteGranted = true
 		reply.Term = self.currentTerm
+	} else {
+		self.votedFor = candidate.CandidateId
+		self.isLeaderOk = false
 	}
-
-	self.currentTerm = candidate.Term
 }
 
 func (self *Raft) ReplicateLog(log []interface{}, replicated chan<- bool) {
@@ -353,15 +360,15 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) startDaemon() {
 	for rf.killed() == false {
 		rf.mu.Lock()
-		defer rf.mu.Unlock()
 		// Check if a leader election should be started.
 		if !rf.isLeaderOk {
 			rf.StartElection()
 		}
 
+		rf.isLeaderOk = false
+		rf.mu.Unlock()
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		rf.isLeaderOk = false
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
@@ -382,10 +389,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.dead = 0
 	rf.state = "follower"
+	rf.isLeaderOk = true
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.lastLogIdx = 0
 	rf.lastLogTerm = 0
 	// Your initialization code here (3A, 3B, 3C).
 
