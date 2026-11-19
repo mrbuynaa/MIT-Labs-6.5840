@@ -36,6 +36,7 @@ type Raft struct {
 	votedFor    int
 	currentTerm int
 	commitIndex int
+	lastLogIdx  int
 	lastLogTerm int
 	lastApplied int
 	isLeaderOk  bool
@@ -146,7 +147,7 @@ func (rf *Raft) StartElection() {
 		CandidateId:  rf.me,
 		Term:         rf.currentTerm,
 		LastLogIndex: rf.commitIndex,
-		// LastLogTerm:  ,
+		LastLogTerm:  rf.lastLogTerm,
 	}
 
 	votes := 1
@@ -185,20 +186,28 @@ func (rf *Raft) StartElection() {
 }
 
 func (self *Raft) RequestVote(candidate *RequestVoteArgs, reply *RequestVoteReply) {
-	if candidate.Term < self.currentTerm {
+	if self.votedFor != 0 || candidate.Term < self.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = self.currentTerm
 		return
 	}
+
+	if candidate.LastLogIndex >= self.lastLogIdx && candidate.LastLogTerm >= self.lastLogTerm {
+		self.votedFor = candidate.CandidateId
+		reply.VoteGranted = true
+		reply.Term = self.currentTerm
+	}
+
+	self.currentTerm = candidate.Term
 }
 
-func (self *Raft) ReplicateLog(command interface{}, replicated chan<- bool) {
+func (self *Raft) ReplicateLog(log []interface{}, replicated chan<- bool) {
 	args := AppendEntriesArgs{
 		LeaderId:     self.me,
 		Term:         self.currentTerm,
 		PrevLogIndex: len(self.log) - 1,
 		PrevLogTerm:  self.lastLogTerm,
-		Entries:      []interface{}{command},
+		Entries:      log,
 		LeaderCommit: self.commitIndex,
 	}
 	majority := len(self.peers)/2 + 1
@@ -243,6 +252,7 @@ func (self *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
+	self.isLeaderOk = true
 	currentIdx := len(self.log) - 1
 	if currentIdx == args.PrevLogIndex && self.lastLogTerm == args.PrevLogTerm {
 		self.log = append(self.log, args.Entries...)
@@ -309,7 +319,10 @@ func (self *Raft) Start(command interface{}) (int, int, bool) {
 	if !isLeader {
 		return -1, -1, isLeader
 	}
-	self.ReplicateLog(command, replicated)
+
+	logs := []interface{}{command}
+	self.ReplicateLog(logs, replicated)
+
 	if <-replicated {
 		self.log = append(self.log, command)
 		self.lastLogTerm = self.currentTerm
@@ -337,7 +350,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) ticker() {
+func (rf *Raft) startDaemon() {
 	for rf.killed() == false {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
@@ -379,8 +392,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// start ticker goroutine to start elections
-	go rf.ticker()
+	go rf.startDaemon()
 
 	return rf
 }
