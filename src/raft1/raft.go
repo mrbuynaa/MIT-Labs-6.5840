@@ -187,7 +187,14 @@ func (self *Raft) StartElection() {
 }
 
 func (self *Raft) RequestVote(candidate *RequestVoteArgs, reply *RequestVoteReply) {
-	if self.votedFor != 0 || candidate.Term < self.currentTerm {
+	// already voted in this term
+	if self.votedFor != 0 && self.currentTerm == candidate.Term {
+		reply.VoteGranted = false
+		reply.Term = self.currentTerm
+		return
+	}
+
+	if candidate.Term < self.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = self.currentTerm
 		return
@@ -203,7 +210,6 @@ func (self *Raft) RequestVote(candidate *RequestVoteArgs, reply *RequestVoteRepl
 		reply.VoteGranted = true
 		reply.Term = self.currentTerm
 	} else {
-		self.votedFor = candidate.CandidateId
 		self.isLeaderOk = false
 	}
 }
